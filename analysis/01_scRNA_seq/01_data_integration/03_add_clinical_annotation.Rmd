@@ -1,0 +1,1033 @@
+---
+title: "IBD_uc"
+author: "yzy"
+date: "2025-12-06"
+output: html_document
+---
+###get clinical data
+
+```{r}
+library(GEOquery)
+library(tidyverse)
+gse <- getGEO("GSE282122", GSEMatrix = TRUE)
+if (is.list(gse)) gse <- gse[[1]]
+
+# 取样本表（phenoData）
+pheno <- pData(gse)
+
+# 查看所有可用字段名
+colnames(pheno)
+
+
+```
+
+#成人IBD课题
+
+```{r}
+setwd("data")  
+library(tidyverse)
+library(Seurat)
+library(scRNAtoolVis)
+clusterCols <- c("#843C39", "#8C6D31", "#E6550D", "#3182BD", "#54990F",
+                 "#BD9E39", "#E7BA52", "#31A354", "#E41A1C", "#6BAED6",
+                 "#9ECAE1", "#AD494A", "#A1D99B", "#C7E9C0", "#99600F",
+                 "#C3BC3F", "#D6616B", "#FF7F00", "#1B9E77", "#FDAE6B", 
+                 "#66A61E", "#F1788D", "#E6550D", "#E7969C")
+
+
+
+cell_colors <- c(
+  "#96cada",   # Light blue
+  "#4eb144",   # Light green
+  "#a7d492",          # Light gray
+  "#347bae",           # Yello
+  "#fb8484",      # Khaki
+  "#fdb26f",           # Thistle
+  "#edcc55",           # Light gray (similar to vγT)
+  "#ff6060",        # Purple
+  "#c3a9ca",        # Tomato
+  "#8f76b2",           # Hot pink
+  "#4c999f",     # Yellow (same as NK)
+  '#f88517'
+)
+```
+
+####导入临床信息，提取metadata，合并临床信息
+
+```{r}
+###读入rds
+scrna_ibd <- readRDS("data/UC/uc_merge_data_disease_filterover.rds")
+###提取临床信息
+scrna_ibd1 <- subset(scrna_ibd,group != 'UC-self control')
+rm(scrna_ibd)
+```
+
+####重新进行整合质控
+
+```{r}
+obj <- scrna_ibd1
+obj <- JoinLayers(obj)
+## Ⅰ. 基因过滤：>3 个细胞中表达
+counts <- GetAssayData(obj, slot = "counts")  
+selected_f <- rownames(obj)[Matrix::rowSums(counts > 0) > 3]
+genes_before <- nrow(obj)
+obj <- subset(obj, features = selected_f)
+genes_after <- nrow(obj)
+plot1 <- FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+## Ⅱ. 添加 QC 特征
+obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^MT-")
+obj[["percent.hb"]] <- PercentageFeatureSet(obj, pattern = "^HB[AB]")
+
+## Ⅲ. 细胞过滤
+n_before <- ncol(obj)
+obj<- subset(obj,
+              subset = nFeature_RNA > 200 &
+                nFeature_RNA < 6000 &
+                percent.mt   < 15 &
+                percent.hb   < 1)
+n_after <- ncol(obj)
+process <- data.frame(
+  cells_before = n_before,
+  cells_after  = n_after,
+  genes_before = genes_before,
+  genes_after  = genes_after)
+feats <- c("nFeature_RNA", "nCount_RNA")
+table(obj$orig.ident)
+
+p1=VlnPlot(obj, group.by = "orig.ident", features = feats, pt.size = 0, ncol = 2) + 
+  NoLegend()
+w=length(unique(obj$orig.ident))/3+5;w
+
+feats <- c("percent.mt",  "percent.hb")
+p2=VlnPlot(obj, group.by = "orig.ident", features = feats, pt.size = 0, ncol = 2, same.y.lims=T) + 
+  scale_y_continuous(breaks=seq(0, 100, 5)) +
+  NoLegend()
+p3=FeatureScatter(obj, "nCount_RNA", "nFeature_RNA", group.by = "orig.ident", pt.size = 0.5)
+p=p1+p2+p3
+ggsave(filename="QC_PROCESS.pdf",plot=p,width = 100*w,height = 100*w,limitsize = FALSE)
+library(scDblFinder)
+library(BiocParallel)
+getwd()
+sce <- as.SingleCellExperiment(obj)
+sce <- scDblFinder(sce, samples = sce$orig.ident, BPPARAM = SnowParam(2))
+# 写回标签
+obj$scDblFinder.class <- sce$scDblFinder.class
+table(obj$scDblFinder.class)
+
+###dbcell result present
+obj <- NormalizeData(obj, 
+                     normalization.method = "LogNormalize",
+                     scale.factor = 1e4) 
+obj <- FindVariableFeatures(obj)
+obj <- ScaleData(obj)
+obj <- RunPCA(obj, features = VariableFeatures(object = obj))
+library(harmony)
+obj <- RunHarmony(obj, "orig.ident")
+
+obj <- RunUMAP(obj,  dims = 1:15, 
+               reduction = "harmony")
+p <- DimPlot(obj,reduction = "umap",label=T,group.by = 'scDblFinder.class' ) 
+ggsave(filename="doublecell_process.pdf",plot=p,width = 15,height = 15)
+db_result <- table(obj$scDblFinder.class)
+# 保留 singlet
+obj_filter <- subset(obj, subset = scDblFinder.class == "singlet")
+sce.all.filt <-obj_filter
+sce.all.filt <- NormalizeData(sce.all.filt, 
+                              normalization.method = "LogNormalize",
+                              scale.factor = 1e4) 
+sce.all.filt <- FindVariableFeatures(sce.all.filt)
+sce.all.filt <- ScaleData(sce.all.filt)
+sce.all.filt <- RunPCA(sce.all.filt, features = VariableFeatures(object = sce.all.filt))
+library(harmony)
+sce.all.filt <- RunHarmony(sce.all.filt, "orig.ident")
+
+sce.all.filt <- RunUMAP(sce.all.filt,  dims = 1:15, 
+                        reduction = "harmony")
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'orig.ident' ) 
+sce.all.filt <- FindNeighbors(sce.all.filt, reduction = "harmony",
+                              dims = 1:15) 
+for (res in c(0.01, 0.05, 0.1, 0.2, 0.3, 0.5,0.8,1)) {
+  sce.all.filt=FindClusters(sce.all.filt, #graph.name = "CCA_snn", 
+                            resolution = res, algorithm = 1)
+}
+library(clustree)
+p2_tree=clustree(sce.all.filt@meta.data, prefix = "RNA_snn_res.")
+p2_tree
+DimPlot(sce.all.filt,group.by = "RNA_snn_res.0.3")
+FeaturePlot(sce.all.filt,features  = c('PTPRC','EPCAM'))
+```
+
+#注释 ##major注释
+
+```{r}
+
+genes_to_check = c('EPCAM','KRT19','CLDN4',  #上皮
+                   'PECAM1' , 'CLO1A2', 'VWF',  #基质
+                   'PTPRC','CD3D', 'CD3E', 'CD8A', 'CD4','CD2', #T
+                   'CDH5', 'PECAM1', 'VWF',  #内皮
+                   'LUM' , 'FGF7', 'MME',  #成纤维
+                   'AIF1', 'C1QC','C1QB','LYZ',  #巨噬
+                   'MKI67', 'STMN1', 'PCNA',  #增殖
+                   'CPA3' ,'CST3', 'KIT', 'TPSAB1','TPSB2',#肥大
+                   'GOS2', 'S100A9','S100A8','CXCL8', #中性粒细胞
+                   'KLRD1', 'GNLY', 'KLRF1','AREG', 'XCL2','HSPA6', #NK
+                   'MS4A1','CD19', 'CD79A','IGHG1','MZB1', 'SDC1',  #B
+                   'CSF1R', 'CSF3R', 'CD68') #髓系
+p = DotPlot(sce.all.filt, features = unique(genes_to_check),group.by = "RNA_snn_res.0.3",
+                assay='RNA'  ) + coord_flip()
+p
+ggsave(filename="major_annotation2.pdf",plot=p,width = w,height = w)
+
+celltype=data.frame(ClusterID=0:17,
+                    celltype= 0:17) 
+celltype[celltype$ClusterID %in% c(4),2]='Epithelial'
+celltype[celltype$ClusterID %in% c(0,1,13,14,15,16,2,3,7,8),2]='Immune'
+celltype[celltype$ClusterID %in% c(10,11,12,17,5,6,9),2]='Stromal'
+
+sce.all.filt@meta.data$marjor_type = "NA"
+for(i in 1:nrow(celltype)){
+  sce.all.filt@meta.data[which(sce.all.filt@meta.data$RNA_snn_res.0.3==celltype$ClusterID[i]),'marjor_type'] <- celltype$celltype[i]}
+table(sce.all.filt@meta.data$marjor_type)
+
+cellRatioPlot(object = major_annotation,
+              sample.name = "group",
+              celltype.name = "marjor_type")
+p <- DimPlot(sce.all.filt,group.by = "marjor_type",reduction = 'umap')
+ggsave(filename="major_umap.pdf",plot=p,width = w,height = w)
+DimPlot(major_annotation,group.by = "marjor_type",reduction = 'umap',label = T)
+saveRDS(sce.all.filt,file = 'major_annotation.rds')
+```
+
+##immune_MAJOR_annotation
+
+```{r}
+major_annotation <- readRDS("data/major_annotation.rds")
+IBD_immune <- subset(major_annotation,marjor_type=='Immune')
+sce.all.filt <- IBD_immune
+sce.all.filt <- NormalizeData(sce.all.filt, 
+                              normalization.method = "LogNormalize",
+                              scale.factor = 1e4) 
+sce.all.filt <- FindVariableFeatures(sce.all.filt)
+sce.all.filt <- ScaleData(sce.all.filt)
+sce.all.filt <- RunPCA(sce.all.filt, features = VariableFeatures(object = sce.all.filt))
+library(harmony)
+sce.all.filt <- RunHarmony(sce.all.filt, "orig.ident")
+
+sce.all.filt <- RunUMAP(sce.all.filt,  dims = 1:15, 
+                        reduction = "harmony")
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'orig.ident' ) 
+sce.all.filt <- FindNeighbors(sce.all.filt, reduction = "harmony",
+                              dims = 1:15) 
+for (res in c(0.01, 0.05, 0.1, 0.2, 0.3, 0.5,0.8,1)) {
+  sce.all.filt=FindClusters(sce.all.filt, #graph.name = "CCA_snn", 
+                            resolution = res, algorithm = 1)
+}
+library(clustree)
+p2_tree=clustree(sce.all.filt@meta.data, prefix = "RNA_snn_res.")
+p2_tree
+DimPlot(sce.all.filt,group.by = "RNA_snn_res.0.5",label = T)
+cellRatioPlot(object = sce.all.filt,
+              sample.name = "disease_rank",
+              celltype.name = "RNA_snn_res.0.5")
+p = DotPlot(sce.all.filt, features = unique(c('CD3E','CD19','LYZ','CD68')),
+            group.by = "RNA_snn_res.0.5",
+                assay='RNA'  ) + coord_flip()
+gene_list <- list(
+  Epithelial = c("EPCAM","KRT19","CLDN4"),
+  
+  Stroma = c("PECAM1","CLO1A2","VWF"),
+  
+  T_cells = c("PTPRC","CD3D","CD3E","CD8A","CD4","TRDC",'FOXP3'),
+  
+  Macrophage = c("AIF1","C1QC","C1QB","LYZ"),
+  
+  Proliferation = c("MKI67","STMN1","PCNA"),
+  
+  Mast_cells = c("CPA3","CST3","KIT","TPSAB1","TPSB2"),
+  
+  Neutrophil = c("GOS2","S100A9","S100A8","CXCL8"),
+  
+  NK = c("KLRD1","GNLY","KLRF1","AREG","XCL2","HSPA6"),
+  
+  B_cells = c("MS4A1","CD19","CD79A","IGHG1","MZB1","SDC1"),
+  
+  Myeloid = c("CSF1R","CSF3R","CD68","ITGAX")
+)
+
+
+p = DotPlot(sce.all.filt, features = gene_list,
+            group.by = "RNA_snn_res.1",
+                assay='RNA'  )+RotatedAxis()
+
+MARKER_LIST2_HUMAN <- list(
+
+  T_MARKER = c("PTPRC","CD3E","CD3D","TRDC",'CD4','CD8A','SELL','FOXP3'),
+
+  ILC_MARKER = c("IL7R","RORC","GATA3","IL2RG","ID2","TOX","TCF7"),
+
+  MACRO_MONO = c("LYZ","CD68","CD86","CSF1R","AIF1",
+                 "C1QA","C1QB","C1QC","CD14","FCGR3A","ITGAM"),
+
+  DC_MARKER = c("ITGAX",
+                ## 小鼠 Ly6c2、Ly6d → 人类对应：
+                ## LY6C2 在人类中没有严格同源基因，最接近是 LY6C  
+                "LY6C",
+                "LY6D"),
+
+  Neutrophil_MARKER = c("S100A8","S100A9"),
+
+  MAST_MARKER = c("CPA3","CST3","KIT"),
+
+  B_MARKER = c("MS4A1","CD19","CD79A"),
+  
+  PLASMA =c('IGHG1', 'MZB1', 'SDC1'),
+  
+  proliferation =c('MKI67', 'PCNA')
+)
+
+DotPlot(
+  object = sce.all.filt,,group.by = "RNA_snn_res.1",features =MARKER_LIST2_HUMAN ,
+  assay = "RNA"
+) + RotatedAxis()
+
+celltype=data.frame(ClusterID=0:26,
+                    celltype= 0:26) 
+celltype[celltype$ClusterID %in% c(0,12,4,24,5,23,2,25,13,22),2]='T/NK'
+celltype[celltype$ClusterID %in% c(18),2]='Mast'
+celltype[celltype$ClusterID %in% c(10,17,19),2]='MYLOID'
+celltype[celltype$ClusterID %in% c(1,11,15),2]='B'
+celltype[celltype$ClusterID %in% c(6,21,7,3,8,14,9,20,26,16),2]='plasma'
+
+
+sce.all.filt@meta.data$celltype_immune = "NA"
+for(i in 1:nrow(celltype)){
+  sce.all.filt@meta.data[which(sce.all.filt@meta.data$RNA_snn_res.1 == celltype$ClusterID[i]),'celltype_immune'] <- celltype$celltype[i]}
+table(sce.all.filt@meta.data$celltype_immune)
+sce.all.filt$disease_rank <- factor(sce.all.filt$disease_rank, levels = c('Healthy', 'Inflammatory (B1)', 'Stricturing (B2)', 'Fistulating (B3)'))
+cellRatioPlot(object = sce.all.filt,
+              sample.name = "disease",
+              celltype.name = "celltype_immune",fill.col = cell_colors)
+DimPlot(sce.all.filt,group.by = "celltype_immune",label = T,cols = cell_colors)
+getwd()
+saveRDS(sce.all.filt,file = 'IMMUNE_MAJOR_IBD.rds')
+```
+
+
+##T_SUBSET_annotation
+
+```{r}
+DimPlot(IMMUNE_MAJOR_IBD,group.by = 'celltype_immune',label = T)
+IMMUNE_MAJOR_IBD <- readRDS("data/IMMUNE_MAJOR_IBD.rds")
+sce.all.filt <- subset(IMMUNE_MAJOR_IBD,celltype_immune=='T/NK')
+sce.all.filt <- NormalizeData(sce.all.filt, 
+                              normalization.method = "LogNormalize",
+                              scale.factor = 1e4) 
+sce.all.filt <- FindVariableFeatures(sce.all.filt)
+sce.all.filt <- ScaleData(sce.all.filt)
+sce.all.filt <- RunPCA(sce.all.filt, features = VariableFeatures(object = sce.all.filt))
+library(harmony)
+sce.all.filt <- RunHarmony(sce.all.filt, "orig.ident")
+
+sce.all.filt <- RunUMAP(sce.all.filt,  dims = 1:15, 
+                        reduction = "harmony")
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'orig.ident' ) 
+sce.all.filt <- FindNeighbors(sce.all.filt, reduction = "harmony",
+                              dims = 1:15) 
+for (res in c(0.01, 0.05, 0.1, 0.2, 0.3, 0.5,0.8,1)) {
+  sce.all.filt=FindClusters(sce.all.filt, #graph.name = "CCA_snn", 
+                            resolution = res, algorithm = 1)
+}
+library(clustree)
+p2_tree=clustree(sce.all.filt@meta.data, prefix = "RNA_snn_res.")
+p2_tree
+ DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'RNA_snn_res.0.5' ) 
+marker_genes_list <- list(
+  "General T cell markers" = c('PTPRC','JCHAIN',"CD3D", "CD3E", "CD3G", "CD8A", "CD8B", "CD4"),
+  "ILC3" = c("IL7R","RORC","GATA3","IL2RG","ID2","TOX","TCF7"),
+  "MAIT" = c("SLC4A10", "TRAV1-2"),
+  "NK_CD16" = c("FCGR3A", "GNLY", "GZMB", "NKG7"),
+  "NK_CD56bright" = c("XCL1", "IL2RB", "NCAM1", "NCR1"),
+  "T follicular helper markers" = c("CXCR5", "BCL6", "PDCD1", "CD40LG"),
+  "Naive T cell markers" = c("CCR7", "SELL",'IL17A','IFNG'),
+  "Tregs" = c("FOXP3", "CTLA4", "IL10"),
+  "Trm/em_CD8" = c("GZMK", "CRTAM", "EOMES"),
+  "Tissue resident memory T markers" = c("ITGAE", "ITGA1", "SPRY1"),
+  "gdT markers" = c("KLRC2", "TRDC", "TRGC1", "KIR2DL4"),
+  "proli markers" = c("MKI67", "TOP2A", "PCNA"),
+  'extro' = c('TIGIT', 'ICOS','LAG3'),
+  'NKT' = c('TBX21')
+)
+DotPlot(
+  object   = sce.all.filt,
+  group.by = "RNA_snn_res.0.8",
+  features = marker_genes_list
+) + RotatedAxis()
+
+
+t_0.8_marker <- FindAllMarkers(sce.all.filt,group.by = "RNA_snn_res.0.8",only.pos = T,min.pct = 0.1,logfc.threshold = 0.5)
+write.csv(t_0.8_marker,file = 't_0.8_marker.CSV')
+cellRatioPlot(object = sce.all.filt,
+              sample.name = "disease_rank",
+              celltype.name = "RNA_snn_res.0.5")
+
+
+celltype=data.frame(ClusterID=0:13,
+                    celltype= 0:13) 
+celltype[celltype$ClusterID %in% c(0),2]='Trm_naive_like'
+celltype[celltype$ClusterID %in% c(1),2]='Naive_T'
+celltype[celltype$ClusterID %in% c(2),2]='CD8_CTL'
+celltype[celltype$ClusterID %in% c(3),2]='Trm_naive_like'
+celltype[celltype$ClusterID %in% c(4),2]='Treg'
+celltype[celltype$ClusterID %in% c(5),2]='TRM_CD4'
+celltype[celltype$ClusterID %in% c(6),2]='DCS'
+celltype[celltype$ClusterID %in% c(7),2]='CD4T_naive'
+celltype[celltype$ClusterID %in% c(8),2]='Trm_CD8'
+celltype[celltype$ClusterID %in% c(9),2]='DCS'
+celltype[celltype$ClusterID %in% c(10),2]='Naive_T'
+celltype[celltype$ClusterID %in% c(11),2]='NK'
+celltype[celltype$ClusterID %in% c(12),2]='cyclin_T'
+celltype[celltype$ClusterID %in% c(13),2]='ILC2/3'
+sce.all.filt@meta.data$T_subtype = "NA"
+for(i in 1:nrow(celltype)){
+  sce.all.filt@meta.data[which(sce.all.filt@meta.data$RNA_snn_res.0.8 == celltype$ClusterID[i]),'T_subtype'] <- celltype$celltype[i]}
+table(sce.all.filt@meta.data$T_subtype)
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'T_subtype',cols =c(cell_colors,clusterCols[13:20])  ) 
+cellRatioPlot(object = sce.all.filt,
+              sample.name = "disease",
+              celltype.name = "T_subtype",fill.col = c(cell_colors,clusterCols[13:20]))
+FeaturePlot(sce.all.filt,features = c('ITGAE','ITGA1','RUNX3','CD69','KLRG1','CCR7','CD4','CD8A','TRDC'))
+cellRatioPlot(object = sce.all.filt,
+              sample.name = "characteristics_ch1.7",
+              celltype.name = "T_subtype",fill.col = c(cell_colors,clusterCols[13:20]))
+
+
+sce.all.filt$CELL_DISEASE <- paste0(sce.all.filt$T_subtype,'_',sce.all.filt$disease)
+DotPlot(sce.all.filt,features = c('KLRG1','ITGAE'),group.by = 'CELL_DISEASE')
+AAA <- as.data.frame(rownames(sce.all.filt))
+seurat_list <- SplitObject(sce.all.filt, split.by = "disease_rank")
+# 创建一个文件夹来保存这些图
+output_dir <- "UMAP_Plots_immune"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# 根据不同的 group 生成 UMAP 图并保存到文件夹
+groups <- names(seurat_list)
+
+for (group in groups) {
+  # 生成 UMAP 图
+  p <- DimPlot(seurat_list[[group]],group.by = "T_subtype",cols =c(cell_colors,clusterCols[13:20]) ) + ggtitle(paste( group))
+  # 保存到文件夹，文件名根据 group 命名
+  file_name <- paste0(output_dir, "/", group, "_UMAP.png")
+  ggsave(file_name, plot = p)
+}
+saveRDS(sce.all.filt,file = 'IBD_T_CELL.rds')
+
+###去除dcs
+IBD_T_CELL_remove_dcs2 <- readRDS("data/IBD_T_CELL_remove_dcs2.rds")
+sce.all.filt <- IBD_T_CELL_remove_dcs2
+sce.all.filt <- subset(sce.all.filt,!T_subtype=='DCS')
+sce.all.filt <- NormalizeData(sce.all.filt, 
+                              normalization.method = "LogNormalize",
+                              scale.factor = 1e4) 
+sce.all.filt <- FindVariableFeatures(sce.all.filt)
+sce.all.filt <- ScaleData(sce.all.filt)
+sce.all.filt <- RunPCA(sce.all.filt, features = VariableFeatures(object = sce.all.filt))
+library(harmony)
+sce.all.filt <- RunHarmony(sce.all.filt, "orig.ident")
+
+sce.all.filt <- RunUMAP(sce.all.filt,  dims = 1:15, 
+                        reduction = "harmony")
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'orig.ident' ) 
+sce.all.filt <- FindNeighbors(sce.all.filt, reduction = "harmony",
+                              dims = 1:15) 
+for (res in c(0.01, 0.05, 0.1, 0.2, 0.3, 0.5,0.8,1)) {
+  sce.all.filt=FindClusters(sce.all.filt, #graph.name = "CCA_snn", 
+                            resolution = res, algorithm = 1)
+}
+library(clustree)
+p2_tree=clustree(sce.all.filt@meta.data, prefix = "RNA_snn_res.")
+p2_tree
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'RNA_snn_res.0.8' ) 
+marker_genes_list <- list(
+  "General T cell markers" = c('PTPRC','JCHAIN',"CD3D", "CD3E", "CD3G", "CD8A", "CD8B", "CD4",'TRAC'),
+  "ILC3" = c("IL7R","RORC","GATA3","IL2RG","ID2","TOX"),
+  "MAIT" = c("SLC4A10", "TRAV1-2"),
+  "NK_CD16" = c("FCGR3A", "GNLY", "GZMB", "NKG7"),
+  "NK_CD56bright" = c("XCL1", "IL2RB", "NCAM1", "NCR1"),
+  "T follicular helper markers" = c("CXCR5", "BCL6", "PDCD1", "CD40LG"),
+  "Naive T cell markers" = c("CCR7", "SELL",'TCF7','LEF1'),
+  "Tregs" = c("FOXP3", "CTLA4", "IL10"),
+  "Trm/em_CD8" = c("GZMK", "CRTAM", "EOMES"),
+  "Tissue resident memory T markers" = c("ITGAE", "ITGA1", "SPRY1",'CD69','RUNX3','CXCR6'),
+  "gdT markers" = c("KLRC2", "TRDC", "TRGC1", "KIR2DL4"),
+  "proli markers" = c("MKI67", "TOP2A", "PCNA"),
+  'extro' = c('TIGIT', 'ICOS','LAG3'),
+  'NKT' = c('TBX21','TNF')
+)
+DotPlot(
+  object   = IBD_T_CELL_remove_dcs2,
+  group.by = "RNA_snn_res.0.8",
+  features = marker_genes_list
+) + RotatedAxis()
+
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'RNA_snn_res.0.8' ) 
+t_0.8_marker <- FindAllMarkers(sce.all.filt,group.by = "RNA_snn_res.0.8",only.pos = T,min.pct = 0.1,logfc.threshold = 0.5)
+write.csv(t_0.8_marker,file = 't_0.8_marker.CSV')
+cellRatioPlot(object = sce.all.filt,
+              sample.name = "disease_rank",
+              celltype.name = "RNA_snn_res.0.5")
+sce.all.filt <- IBD_T_CELL_remove_dcs2
+
+celltype=data.frame(ClusterID=0:13,
+                    celltype= 0:13) 
+celltype[celltype$ClusterID %in% c(0),2]='TEM'
+celltype[celltype$ClusterID %in% c(1),2]='Naive_T'
+celltype[celltype$ClusterID %in% c(2),2]='Activated_TEM_LIKE'
+celltype[celltype$ClusterID %in% c(3),2]='CD8_CTL'
+celltype[celltype$ClusterID %in% c(4),2]='Treg'
+celltype[celltype$ClusterID %in% c(5),2]='TH17'
+celltype[celltype$ClusterID %in% c(6),2]='Trm_CD8'
+celltype[celltype$ClusterID %in% c(7),2]='TFH'
+celltype[celltype$ClusterID %in% c(8),2]='Naive_T'
+celltype[celltype$ClusterID %in% c(9),2]='NK'
+celltype[celltype$ClusterID %in% c(10),2]='cyclin_T'
+celltype[celltype$ClusterID %in% c(11),2]='Trm_CD8'
+celltype[celltype$ClusterID %in% c(12),2]='ILC2/3'
+celltype[celltype$ClusterID %in% c(13),2]='Treg'
+sce.all.filt@meta.data$T_subtype = "NA"
+for(i in 1:nrow(celltype)){
+  sce.all.filt@meta.data[which(sce.all.filt@meta.data$RNA_snn_res.0.8 == celltype$ClusterID[i]),'T_subtype'] <- celltype$celltype[i]}
+table(sce.all.filt@meta.data$T_subtype)
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'T_subtype',cols =c(cell_colors,clusterCols[13:20])  ) 
+cellRatioPlot(object = sce.all.filt,
+              sample.name = "disease",
+              celltype.name = "T_subtype",fill.col = c(cell_colors,clusterCols[13:20]))
+FeaturePlot(sce.all.filt,features = c('ITGAE','ITGA1','RUNX3','CD69','KLRG1','CCR7','CD4','CD8A','TRDC'))
+cellRatioPlot(object = sce.all.filt,
+              sample.name = "characteristics_ch1.7",
+              celltype.name = "T_subtype",fill.col = c(cell_colors,clusterCols[13:20]))
+
+
+sce.all.filt$CELL_DISEASE <- paste0(sce.all.filt$T_subtype,'_',sce.all.filt$disease)
+DotPlot(sce.all.filt,features = c('IL10','IFNG','RORA','KLRG1'),group.by = 'CELL_DISEASE')
+AAA <- as.data.frame(rownames(sce.all.filt))
+seurat_list <- SplitObject(sce.all.filt, split.by = "disease_rank")
+# 创建一个文件夹来保存这些图
+output_dir <- "UMAP_Plots_immune"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# 根据不同的 group 生成 UMAP 图并保存到文件夹
+groups <- names(seurat_list)
+
+for (group in groups) {
+  # 生成 UMAP 图
+  p <- DimPlot(seurat_list[[group]],group.by = "T_subtype",cols =c(cell_colors,clusterCols[13:20]) ) + ggtitle(paste( group))
+  # 保存到文件夹，文件名根据 group 命名
+  file_name <- paste0(output_dir, "/", group, "_UMAP.png")
+  ggsave(file_name, plot = p)
+}
+saveRDS(sce.all.filt,file = 'IBD_T_CELL_remove_dcs2.rds')
+
+DGE_results_p3 <- list()
+
+####p0###
+sce.all.filt$cell_subtype<- sce.all.filt$T_subtype
+sce.all.filt$nec_groups<- sce.all.filt$disease
+for (tm in unique(sce.all.filt$cell_subtype)) {
+  
+  # 按细胞类型 subset
+  nec_data_subset <- subset(sce.all.filt, subset = cell_subtype == tm)
+  if (ncol(nec_data_subset) == 0) next
+  
+  # 设定分组为 age_disease
+  Idents(nec_data_subset) <- "nec_groups"
+
+    dge <- FindMarkers(
+    nec_data_subset,
+    ident.1 = "UC",
+  ident.2 = "HC",
+    logfc.threshold = 0.5,   # 你原来是 0.5，这里注意参数名是 logfc.threshold
+    test.use = "wilcox",
+    min.pct = 0.1,
+    min.diff.pct = 0.1,
+    only.pos = FALSE,        # 关键：要上下调都要，所以设 FALSE
+    max.cells.per.ident = 100,
+    assay = "RNA"
+  )
+
+  
+  dge$celltype  <- tm
+  
+  # 标记方向（NEC 上调 or Con 上调）
+  fc_col <- if ("avg_log2FC" %in% colnames(dge)) "avg_log2FC" else "avg_logFC"
+  dge$direction <- ifelse(dge[[fc_col]] > 0, "NEC_p0_up", "Con_p0_up")
+  dge <- dge %>% filter(p_val<0.05)
+  dge <- dge %>% filter(abs(avg_log2FC)>0.25)
+  dge$gene <- rownames(dge)
+  DGE_results_p3[[paste0(tm, "_P0_NEc_vs_Con")]] <- dge
+}
+
+
+
+
+```
+
+
+##Myeloid_SUBSET_annotation
+
+```{r}
+DimPlot(IMMUNE_MAJOR_IBD,group.by = 'celltype_immune',label = T)
+IMMUNE_MAJOR_IBD <- readRDS("data/spatial/IMMUNE_MAJOR_IBD.rds")
+sce.all.filt <- subset(IMMUNE_MAJOR_IBD,celltype_immune=='MYLOID')
+sce.all.filt <- NormalizeData(sce.all.filt, 
+                              normalization.method = "LogNormalize",
+                              scale.factor = 1e4) 
+sce.all.filt <- FindVariableFeatures(sce.all.filt)
+sce.all.filt <- ScaleData(sce.all.filt)
+sce.all.filt <- RunPCA(sce.all.filt, features = VariableFeatures(object = sce.all.filt))
+library(harmony)
+sce.all.filt <- RunHarmony(sce.all.filt, "orig.ident")
+
+sce.all.filt <- RunUMAP(sce.all.filt,  dims = 1:15, 
+                        reduction = "harmony")
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'orig.ident' ) 
+sce.all.filt <- FindNeighbors(sce.all.filt, reduction = "harmony",
+                              dims = 1:15) 
+for (res in c(0.01, 0.05, 0.1, 0.2, 0.3, 0.5,0.8,1)) {
+  sce.all.filt=FindClusters(sce.all.filt, #graph.name = "CCA_snn", 
+                            resolution = res, algorithm = 1)
+}
+library(clustree)
+p2_tree=clustree(sce.all.filt@meta.data, prefix = "RNA_snn_res.")
+p2_tree
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'RNA_snn_res.0.3' ) 
+marker_genes_list <- list(
+  "MHCII genes" = c('PTPRC',"HLA-DRA", "HLA-DRB1", "HLA-DPA1"),
+  cDC1 = c("ITGAX", "CLEC9A", "XCR1", "BATF3", "CADM1", "RAB7B",'LYZ'),
+  cDC2 = c("FCER1A", "CD1C", "CLEC10A",'ZEB2','ZRF4'),
+  
+  "Migratory DCs" = c("CCR7", "LAMP3"),
+  "Plasmacytoid DCs" = c("IRF7", "CLEC4C", "GZMB", "JCHAIN", "LILRA4",'BDCA2'),
+  "Langerhans cells" = c("IL22RA2", "CD207", "RUNX3"),
+  
+  Monocyte = c('CD14',"FCN1", "S100A8", "S100A9", "IL1B", "EREG", "NAMPT", "PLAUR", "VCAN", "FPR1"),
+  "Mono/neutrophil_MPO" = c("MPO", "RETN", "RNASE2", "PCLAF"),
+  
+  "Macrophage general markers" = c("C1QA", "C1QB", "C1QC", "CD68", "APOE", "CD209",'CSF1R','LGMN'),
+  Macrophage_CD5L = c("CD5L", "VCAM1", "CXCL12", "PDK4", "RBP7",'CD163', 'MRC1'),
+  Macrophage_LYVE1 = c("LYVE1", "RNASE1", "FOLR2"),
+  Macrophage_MMP9 = c("MMP9", "PLA2G2D", "ADAMDEC1"),
+  Macrophage_TREM2 = c("TREM2", "ACP5", "CTSD", "CSTB",'ITGA1','ITGAE'),
+  
+  Mast = c("CD69", "KIT", "TPSB2", "TPSAB1"),
+  "Eosinophils/basophils" = c("GATA2", "CNRIP1", "PRG2", "GIHCG"),
+  Erythrocytes = c("HBZ", "HBE1", "HBG1"),
+  "Megakaryocyte/platelet" = c("GATA1", "TAL1", "MMRN1", "CMTM5", "MPIG6B", "ITGA2B", "PF4",'CD3E'),
+  PROLI = c('MKI67','PCNA','TOP2')
+)
+
+
+
+marker_genes_list <- list(
+  "MHCII genes" = c('PTPRC',"HLA-DRA", "HLA-DRB1", "HLA-DPA1"),
+  cDC1 = c("ITGAX", "CLEC9A", "XCR1", "BATF3", "CADM1", "RAB7B",'LYZ'),
+  cDC2 = c("FCER1A", "CD1C", "CLEC10A",'ZEB2','ZRF4'),
+  
+  "Migratory DCs" = c("CCR7", "LAMP3"),
+  "Plasmacytoid DCs" = c("IRF7", "CLEC4C", "GZMB", "JCHAIN", "LILRA4",'BDCA2'),
+ M1 = c("TNF", "IL1B", "IL6", "NOS2", "CXCL9", "IL12B", "CD80"),
+  M2 = c( "ARG1", "IL10", "TGFB1", "MRC1"),
+  "Macrophage general markers" = c("C1QA", "C1QB", "C1QC", "CD68", "APOE",'CD163', 'GPNMB','CSF1R','LGMN'),
+  PROLI = c('MKI67','PCNA','TOP2','RPS3A','CD14')
+)
+DotPlot(
+  object   = sce.all.filt,
+  group.by = "RNA_snn_res.0.3",
+  features =marker_genes_list,
+) + RotatedAxis()
+
+p2_tree
+
+MYELOID_0.3_marker <- FindAllMarkers(sce.all.filt,group.by = "RNA_snn_res.0.3",only.pos = T,min.pct = 0.6,logfc.threshold = 0.5)
+write.csv(MYELOID_0.3_marker,file = 'MYELOID_0.3_marker.CSV')
+cellRatioPlot(object = sce.all.filt,
+              sample.name = "disease_rank",
+              celltype.name = "RNA_snn_res.0.5")
+
+
+celltype=data.frame(ClusterID=0:15,
+                    celltype= 0:15) 
+celltype[celltype$ClusterID %in% c(0,3,4,7),2]='M1_like_macrophage'
+celltype[celltype$ClusterID %in% c(1,2,10,8,9),2]='M2_like_macrophage'
+celltype[celltype$ClusterID %in% c(15),2]='other'
+celltype[celltype$ClusterID %in% c(14),2]="Migratory DCs"
+celltype[celltype$ClusterID %in% c(12),2]='cDC2_1'
+celltype[celltype$ClusterID %in% c(13),2]='pDC'
+celltype[celltype$ClusterID %in% c(11),2]='cDC1'
+celltype[celltype$ClusterID %in% c(5),2]='Cyclin_marcrophage'
+celltype[celltype$ClusterID %in% c(6),2]='IL32_macrophage'
+sce.all.filt@meta.data$M_subtype = "NA"
+for(i in 1:nrow(celltype)){
+  sce.all.filt@meta.data[which(sce.all.filt@meta.data$RNA_snn_res.0.3 == celltype$ClusterID[i]),'M_subtype'] <- celltype$celltype[i]}
+table(sce.all.filt@meta.data$M_subtype)
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'M_subtype' ) 
+cellRatioPlot(object = sce.all.filt,
+              sample.name = "disease",
+              celltype.name = "M_subtype")
+FeaturePlot(sce.all.filt,features = 'KLRA7')
+saveRDS(sce.all.filt,file = 'IBD_MYLOID.rds')
+```
+##stromal注释
+```{r}
+major_annotation <- readRDS("data/major_annotation.rds")
+sce.all.filt <- subset(major_annotation,marjor_type=='Stromal')
+sce.all.filt <- NormalizeData(sce.all.filt, 
+                              normalization.method = "LogNormalize",
+                              scale.factor = 1e4) 
+sce.all.filt <- FindVariableFeatures(sce.all.filt)
+sce.all.filt <- ScaleData(sce.all.filt)
+sce.all.filt <- RunPCA(sce.all.filt, features = VariableFeatures(object = sce.all.filt))
+library(harmony)
+sce.all.filt <- RunHarmony(sce.all.filt, "orig.ident")
+
+sce.all.filt <- RunUMAP(sce.all.filt,  dims = 1:15, 
+                        reduction = "harmony")
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'orig.ident' ) 
+sce.all.filt <- FindNeighbors(sce.all.filt, reduction = "harmony",
+                              dims = 1:15) 
+for (res in c(0.01, 0.05, 0.1, 0.2, 0.3, 0.5,0.8,1)) {
+  sce.all.filt=FindClusters(sce.all.filt, #graph.name = "CCA_snn", 
+                            resolution = res, algorithm = 1)
+}
+library(clustree)
+p2_tree=clustree(sce.all.filt@meta.data, prefix = "RNA_snn_res.")
+p2_tree
+DimPlot(sce.all.filt,group.by = "RNA_snn_res.0.5",label = T)
+# 一些常用的 stromal / fibroblast marker 集合 -------------------------
+# 一些常用的 stromal / fibroblast marker 集合 -------------------------
+
+# 定义基质细胞标记基因列表
+stromal_marker_list <- list(
+  # 通用成纤维细胞标记
+  markers_fibro_generic = c(
+    "COL1A1", "COL1A2", "COL3A1", "COL6A1"
+  ),
+  
+  # 平滑肌细胞标记
+  markers_smooth_muscle = c(
+    "ACTA2", "TAGLN", "MYH11", "CNN1", "LMOD1",
+    "MYLK", "MYL9", "TPM2", "ACTG2", "DMPK", "SMTN", "FLNA"
+  ),
+  
+  # 周细胞标记
+  markers_pericyte = c(
+    "NDUFA4L2", "SULT1E1", "MEF2C", "COX4I2", "HIGD1B", "RGS5"
+  ),
+  
+  # 内皮细胞标记
+  markers_endothelial = c(
+    "PECAM1", "CD36"
+  ),
+  
+  # 肠间质细胞标记
+  markers_ICC = c(
+    "ANO1", "KIT", "PDGFRA", "KCNMA1"
+  ),
+  
+  # 神经分支相关标记
+  Branch_A1_iMN = c(
+    "GAL", "SCGN", "NOS1", "SPOCK1"
+  ),
+  Branch_A2_IPAN_IN = c(
+    "NTNG1", "GRP", "CHRM3", "NXPH2",'CALB1'
+  ),
+  Branch_A3_IPAN_IN = c(
+    "TAC1", "RUNX1", "ONECUT2", "ONECUT3",'CALB2'
+  ),
+  Branch_A4_IN = c(
+    "ETV1", "GAL", "SCGN", "GCGR", "NEUROD6"
+  ),
+  Branch_B1_eMN = c(
+    "RAMP1", "NXPH4", "NDUFA4L2"
+  ),
+  Branch_B2_eMN = c(
+    "PENK", "HTR7"
+  ),
+  Branch_B3_IPAN = c(
+    "BNC2", "DLX3", "DGKG"
+  ),
+  
+  # 神经母细胞标记
+  Neuroblast = c(
+    "DLL3", "DLL1", "MFNG"
+  ),
+  
+  # 肠神经嵴细胞/胶质祖细胞标记
+  ENCC_glial_progenitor = c(
+    "ERBB3", "SOX10", "FOXD3"
+  ),
+  
+  # 胶质细胞亚群标记
+  Glial_1 = c(
+    "DHH", "RXRG", "GFRA3", "MAL", "FGL2"
+  ),
+  Glial_2 = c(
+    "ELN", "EVA1A", "BMP8B"
+  ),
+  Glial_3 = c(
+    "APOE", "BCAN", "PAQR6"
+  )
+)
+marker_stromal_human_unique <- list(
+  cyclin = c("MKI67","PCNA"),
+  
+  fibroblast = c("SMOC2","DCN","COL1A1","GSN"),
+  
+  SMC = c("ACTA2","DES","TAGLN","MYH11","CKM"),
+  
+  Myofibroblast = c("ACAT2","MYL9","CNN1"),
+  
+  ICC = c("KIT","ETV1","ANO1"),
+  
+  Pdgfra_cell = c("PDGFRA"),
+  
+  stromal = c("ADAMDEC1","BMP4","NOTCH3","MCAM","RGS5","CXCL12"),
+  
+  Mesothelium = c("KRT19","LRRN4","UPK3B"),
+  
+  microvascular_cell = c("PECAM1","CDH5","FABP5","LYVE1"),
+  
+  glia = c("SOX10","FABP7"),
+  
+  neuron = c("ELAVL4","PHOX2B","TUBB3","BNC2"),
+  
+  Pericyte = c("PDGFRB","NDUFA4L2",'PTPRC')
+)
+
+
+
+## 可选：一个 list 方便 DotPlot / heatmap
+
+stromal_marker_list_nodup <- marker_stromal_human
+used <- character(0)
+
+for (nm in names(stromal_marker_list_nodup)) {
+  genes <- stromal_marker_list_nodup[[nm]]
+  genes <- setdiff(genes, used)        # 去掉已经用过的基因
+  stromal_marker_list_nodup[[nm]] <- genes
+  used <- c(used, genes)
+}
+FeaturePlot(sce.all.filt,features = 'TUBB3')
+
+
+DotPlot(
+  object   = sce.all.filt,
+  group.by = "RNA_snn_res.0.5",
+  features = marker_stromal_human_unique
+) + RotatedAxis()
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'RNA_snn_res.0.5' ) 
+
+
+
+sel.clust = "RNA_snn_res.0.3"
+sce.all.filt <- SetIdent(sce.all.filt, value = sel.clust)
+
+markers_13 <- FindMarkers(
+  sce.all.filt,
+  ident.1 = "8",        # 13 群
+  logfc.threshold = 1,
+  min.pct = 0.1,
+  only.pos = TRUE,
+)
+FeaturePlot(
+  major_annotation,
+  features = c('CALB2','SOX10','PTPRC','EPCAM'),
+  reduction = "umap"
+)
+
+top50_13 <- head(
+  markers_13[order(markers_13$avg_log2FC, decreasing = TRUE), ],
+  50
+)
+
+celltype=data.frame(ClusterID=0:17,
+                    celltype= 0:17) 
+celltype[celltype$ClusterID %in% c(0,2,10,7),2]='Stromal'
+celltype[celltype$ClusterID %in% c(4,12,17),2]='pericyte'
+celltype[celltype$ClusterID %in% c(1,3,5,8,9,15,16),2]='endothelial_cells'
+celltype[celltype$ClusterID %in% c(6),2]='glia'
+celltype[celltype$ClusterID %in% c(13),2]='neuron'
+celltype[celltype$ClusterID %in% c(11,14),2]='other'
+
+
+sce.all.filt@meta.data$celltype_stromal = "NA"
+for(i in 1:nrow(celltype)){
+  sce.all.filt@meta.data[which(sce.all.filt@meta.data$RNA_snn_res.0.5 == celltype$ClusterID[i]),'celltype_stromal'] <- celltype$celltype[i]}
+table(sce.all.filt@meta.data$celltype_stromal)
+
+cellRatioPlot(object = sce.all.filt,
+              sample.name = "disease",
+              celltype.name = "celltype_stromal")
+table(sce.all.filt$disease_rank)
+DimPlot(sce.all.filt,group.by = "celltype_stromal",label = T)
+sce.all.filt$cell_disease <- paste0(sce.all.filt$celltype_stromal,'_',sce.all.filt$disease_rank  )
+
+DotPlot(GLIA,features = c('SYT11','SOX10','CALB1'),group.by = 'cell_disease')
+getwd()
+saveRDS(sce.all.filt,file = 'stromal_IBD.rds')
+
+```
+
+
+##EPI_SUBSET_annotation
+
+```{r}
+major_annotation <- readRDS("data/major_annotation.rds")
+
+sce.all.filt <- subset(major_annotation,marjor_type=='Epithelial')
+sce.all.filt <- NormalizeData(sce.all.filt, 
+                              normalization.method = "LogNormalize",
+                              scale.factor = 1e4) 
+sce.all.filt <- FindVariableFeatures(sce.all.filt)
+sce.all.filt <- ScaleData(sce.all.filt)
+sce.all.filt <- RunPCA(sce.all.filt, features = VariableFeatures(object = sce.all.filt))
+library(harmony)
+sce.all.filt <- RunHarmony(sce.all.filt, "orig.ident")
+
+sce.all.filt <- RunUMAP(sce.all.filt,  dims = 1:15, 
+                        reduction = "harmony")
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'orig.ident' ) 
+sce.all.filt <- FindNeighbors(sce.all.filt, reduction = "harmony",
+                              dims = 1:15) 
+for (res in c(0.01, 0.05, 0.1, 0.2, 0.3, 0.5,0.8,1)) {
+  sce.all.filt=FindClusters(sce.all.filt, #graph.name = "CCA_snn", 
+                            resolution = res, algorithm = 1)
+}
+library(clustree)
+p2_tree=clustree(sce.all.filt@meta.data, prefix = "RNA_snn_res.")
+p2_tree
+DimPlot(sce.all.filt,group.by = "RNA_snn_res.0.5",label = T)
+# 一些常用的 stromal / fibroblast marker 集合 -------------------------
+# 一些常用的 stromal / fibroblast marker 集合 -------------------------
+
+# 构建与Python字典完全对应的R命名列表
+marker_genes_dict <- list(
+  General_Epi = c('PTPRC',"EPCAM","KRT8","KRT18"),
+  BEST4 = c("BEST4", "CA7", "OTOP2", "CFTR"),
+  DCS_MUC17 = c("MUC17", "TFF1", "CD55", "TM4SF1", "DUOX2", "DUOXA2"),
+  Enterocyte = c("FABP2", "ALDOB", "APOA1",'MUC1','KLF4'),
+  Enteroendocrine = c("CHGA", "PCSK1N", "SCT", "SCGN", "NEUROD1"),
+  Enteroendocrine_progenitor = c("SOX4"),
+  Goblet = c("TFF3", "FCGBP", "ZG16", "MUC2",'MUC4'),
+  Mature_colonocyte = c("SLC26A3", "AQP8", "CEACAM7"),
+  Stem = c("SMOC2","RGMB","LGR5","SOX9","CD34","BMI1", "ASCL2", "OLFM4"),
+  `Cycling markers` = c("MKI67", "PCLAF", "PCNA", "TOP2A",'Hmgb2','STMN1','CDK1','UBE2C','CENPF'),  # 名称含空格需用反引号
+  Tuft = c("SH2D6", "LRMP", "MATK", "FYB1", "HPGDS"),
+  panth = c("LYZ","DEFA5","DEFA6","REG3A","PRSS2","PLA2G2A","ITLN2","GUCA2A","IFI6"),
+  Enterocytes = c("CA1","RAB6B", "GPT")
+)
+
+markers <- list(
+  CyclingTA = c("TICRR","CDC25C","SAPCD2","MT3","LINC00669","SERPINA6"),
+  ImmatureEnt = c("SLC26A2","CA1","KIAA1239","GLRA4","CELA3A","CELA3B","C8G"),
+  Mcells = c("SOX8","NTRK2","CCL23","CCL20","CTSE","SLC2A6","TNFAIP2","POLD1","GJB3","KCNE2","TNFRSF11A","AKR1C2","SPINK5","ATP11B","NOXO1","SDC4"),
+  Tuft = c("GNG13","SH2D7","SH2D6","TRPM5","AZGP1","BMX","PSTPIP2","LRMP","PTGS1","IL17RB","HCK","PLCG2","ANXA13"),
+  Enterocytes = c("CA1","RAB6B"),
+  Best4posEnt = c("BEST4","CA7","OTOP2","OTOP3","MYOM1","MT1G","MT1H"),
+  General_Epi = c("EPCAM","KRT8","KRT18"),
+  Immature_Goblet = c("KLK1","ITLN1","WFDC2","CLCA1","LRRC26","RETNLB","SPINK4","AGR2"),
+  Goblet = c("MUC2","TFF1","FCGBP","FFAR4","SYTL2","LGALS9B","BCAS1"),
+  Stem = c("SMOC2","RGMB","LGR5","ASCL2","SOX9","CD34","BMI1",'ASCL2'),
+  Enteroendocrine = c("CRYBA2","SCGN","FEV","CHGA","GCG","SCG5","PCSK1N","PYY","NEUROD1","MS4A8","DDC"),
+  Paneth = c("LYZ","DEFA5","DEFA6","REG3A","PRSS2","PLA2G2A","ITLN2","GUCA2A","TFF3","IFI6"),
+  M_cells = c("GP2","KRT7","NTRK2","CCL23","CCL20","POLD1","GJB3","KCNE2","RNF207","TNFRSF11A","AKR1C2","SPINK5","NOXO1"),
+  Other_cells = c("CD3","CD4","CD8","CD14","MS4A4","PLVAP","VWF")
+)
+
+
+intestinal_epithelial_cells_unique <- list(
+  # 小肠上皮细胞标志物
+  small_intestinal_epithelial_cells = c("CDX2", "Villin", "LGR5", "ALPI", "OCLN"),
+
+  # 大肠上皮细胞标志物
+  colon_epithelial_cells = c("KRT8", "MUC2", "FABP2"),
+
+  # 肠道干细胞标志物
+  intestinal_stem_cells = c("OLFM4", "ASCL2", "SMOC2"),
+
+  # 吸收上皮细胞标志物
+  absorptive_epithelial_cells = c("SLC15A1"),
+
+  # 杯状细胞标志物
+  goblet_cells = c("TFF3", "FOXA3"),
+
+  # Paneth细胞标志物
+  paneth_cells = c("LYZ", "REG3A"),
+
+  # 微绒毛细胞标志物
+  brush_border_cells = c("SLC5A1", "SLC22A18"),
+
+  # 肠道上皮相关标志物
+  intestinal_epithelial_markers = c( "KRT18", "E-cadherin")
+)
+
+# 打印输出去重后的 list
+print(intestinal_epithelial_cells_unique)
+
+FeaturePlot(sce.all.filt,features = 'LGR5')
+
+DimPlot(sce.all.filt,group.by = "RNA_snn_res.0.1",label = T)
+DotPlot(
+  object   = sce.all.filt,
+  group.by = "RNA_snn_res.0.3",
+  features = marker_genes_dict
+) + RotatedAxis()
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'RNA_snn_res.0.3' ) 
+epi_0.3_marker <- FindAllMarkers(sce.all.filt,group.by = "RNA_snn_res.0.3",only.pos = T,min.pct = 0.1,logfc.threshold = 0.5)
+
+write.csv(epi_0.3_marker,file = 'epi_0.3_marker.csv')
+DimPlot(sce.all.filt,reduction = "umap",label=T,group.by = 'RNA_snn_res.0.5' )
+DimPlot(sce.all.filt,group.by = 'dataset')
+FeaturePlot(
+  major_annotation,
+  features = c('CALB2','SOX10','PTPRC','EPCAM'),
+  reduction = "umap"
+)
+
+top50_13 <- head(
+  markers_13[order(markers_13$avg_log2FC, decreasing = TRUE), ],
+  50
+)
+celltype=data.frame(ClusterID=0:14,
+                    celltype= 0:14) 
+celltype[celltype$ClusterID %in% c(0,11),2]='high_ribo'
+celltype[celltype$ClusterID %in% c(1),2]='MUC4_epi'
+celltype[celltype$ClusterID %in% c(2),2]='DCS_MUC17'
+celltype[celltype$ClusterID %in% c(3),2]='Mature_colonocyte'
+celltype[celltype$ClusterID %in% c(4),2]='Goblet'
+celltype[celltype$ClusterID %in% c(13),2]='Enterocytes'
+celltype[celltype$ClusterID %in% c(5,6),2]='STEM'
+celltype[celltype$ClusterID %in% c(9),2]='Endocrine'
+celltype[celltype$ClusterID %in% c(10,14),2]='TA'
+celltype[celltype$ClusterID %in% c(7),2]='Other'
+celltype[celltype$ClusterID %in% c(8),2]='Tuft'
+celltype[celltype$ClusterID %in% c(12),2]='Best4'
+sce.all.filt@meta.data$celltype_epi = "NA"
+for(i in 1:nrow(celltype)){
+  sce.all.filt@meta.data[which(sce.all.filt@meta.data$RNA_snn_res.0.3 == celltype$ClusterID[i]),'celltype_epi'] <- celltype$celltype[i]}
+table(sce.all.filt@meta.data$celltype_epi)
+sce.all.filt$disease_rank <- factor(sce.all.filt$disease_rank, levels = c('Healthy', 'Inflammatory (B1)', 'Stricturing (B2)', 'Fistulating (B3)'))
+cellRatioPlot(object = sce.all.filt,
+              sample.name = "disease",
+              celltype.name = "celltype_epi")
+DimPlot(sce.all.filt,group.by = "celltype_epi",label = T)
+sce.all.filt$cell_disease <- paste0(sce.all.filt$celltype_epi,'_',sce.all.filt$disease_rank  )
+
+DotPlot(GLIA,features = c('SYT11','SOX10','CALB1'),group.by = 'cell_disease')
+saveRDS(sce.all.filt,file = 'EPI_IBD.rds')
+head(sce.all.filt@meta.data)
+```

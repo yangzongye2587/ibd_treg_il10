@@ -1,0 +1,41 @@
+# Large sequencing and single-cell objects
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.bai
+*.sam
+*.h5
+*.h5ad
+*.loom
+*.rds
+*.RData
+*.Rhistory
+
+# Raw cytometry, imaging and proprietary analysis files
+*.fcs
+*.wsp
+*.prism
+*.tif
+*.tiff
+*.czi
+
+# Generated outputs
+data/
+results/
+figures/
+output/
+outputs/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.svg
+
+# System and editor files
+.DS_Store
+Thumbs.db
+~$*
+.ipynb_checkpoints/
+

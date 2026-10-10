@@ -1,0 +1,204 @@
+📊 完整路线图（我们一步一步来）：
+
+Step 2 ✅ ← 你在这里：创建环境 + 装包
+Step 3    ：下载 SRA 数据
+Step 4    ：转换成 FASTQ
+Step 5    ：比对到 mm10 基因组
+Step 6    ：生成 bigWig 信号文件
+Step 7    ：MACS2 Peak Calling
+Step 8    ：在 Tnfrsf1b 基因座出峰图
+2.1 创建 Conda 环境
+
+conda create -n chipseq python=3.10 -y
+等它跑完后，激活环境：
+
+
+conda activate chipseq
+💡 激活后，你的终端前面应该会显示 (chipseq)
+
+2.2 安装 bioconda 渠道的生信软件
+一条一条来，每条等跑完再执行下一条：
+
+
+conda install -c bioconda sra-tools -y
+
+conda install -c bioconda bowtie2 -y
+
+conda install -c bioconda samtools -y
+
+conda install -c bioconda macs2 -y
+
+conda install -c bioconda deeptools -y
+
+conda install -c bioconda bedtools -y
+
+conda install -c bioconda fastqc -y
+2.3 安装 Python 绘图包
+
+conda install -c conda-forge matplotlib numpy pandas -y
+
+conda install -c bioconda pybigwig -y
+
+conda activate chipseq
+确认你的 6 个 FASTQ 文件在哪里：
+cd ~/chipseq_tnfr2
+ls -lh *.fastq.gz
+1. 建立 mm10 参考基因组索引（如果还没有）
+cd ~/chipseq_tnfr2
+
+# 1）下载官方 Bowtie2 mm10 索引
+mkdir -p ref/bowtie2_mm10
+cd ref/bowtie2_mm10
+
+wget -c ftp://ftp.ccb.jhu.edu/pub/data/bowtie2_indexes/mm10.zip
+
+# 2）解压
+unzip mm10.zip
+
+# 3）验证索引文件
+ls -lh mm10*
+
+
+
+2. 比对 FASTQ 到 mm10（单端 ChIP-seq）
+2.1 建一个输出目录
+
+cd ~/chipseq_tnfr2
+mkdir -p bam
+2.2 批量比对（单端）
+
+cd ~/chipseq_tnfr2
+
+for SRR in SRR29084974 SRR29084975 SRR29084976 SRR29084977 SRR29084978 SRR29084979
+do
+  echo ">>> Mapping $SRR ..."
+  bowtie2 -p 8 --very-sensitive -x ~/chipseq_tnfr2/ref/bowtie2_mm10/mm10 \
+    -U ${SRR}.fastq.gz \
+    | samtools sort -@ 4 -o bam/${SRR}.sorted.bam -
+
+  # 建索引
+  samtools index bam/${SRR}.sorted.bam
+done
+
+
+2.3 快速看一眼比对率
+
+cd ~/chipseq_tnfr2
+
+for b in bam/*.sorted.bam; do
+  echo "$(basename$b):"
+  samtools flagstat "$b" | head -n 5
+  echo
+done
+
+
+3. 样本分组（ChIP vs Input）并合并 BAM（可选）
+你的样本是：
+
+ChIP（BATF）
+SRR29084979：WT_Treg_1 (BATF)
+SRR29084978：WT_Treg_2 (BATF)
+SRR29084977：WT_Tconv_1 (BATF)
+SRR29084976：WT_Tconv_2 (BATF)
+Input
+SRR29084975：WT_Treg (Input)
+SRR29084974：WT_Tconv (Input)
+如果你希望先按组合并 BAM 再做下游，可以这样做：
+
+
+cd ~/chipseq_tnfr2
+
+# Treg BATF ChIP（rep1+rep2 合并）
+samtools merge bam/BATF_Treg_merged.bam \
+  bam/SRR29084979.sorted.bam \
+  bam/SRR29084978.sorted.bam
+
+# Tconv BATF ChIP（rep1+rep2 合并）
+samtools merge bam/BATF_Tconv_merged.bam \
+  bam/SRR29084977.sorted.bam \
+  bam/SRR29084976.sorted.bam
+
+# Treg Input
+samtools merge bam/Input_Treg_merged.bam \
+  bam/SRR29084975.sorted.bam
+
+# Tconv Input
+samtools merge bam/Input_Tconv_merged.bam \
+  bam/SRR29084974.sorted.bam
+
+# 为合并后的 BAM 建索引
+for b in bam/*_merged.bam; do
+  samtools index "$b"
+done
+如果你更想保留重复信息，也可以不合并，后面 MACS2 多样本一起 call；这里合并主要是为了简化示
+
+4. 用 deepTools 生成 bigWig 信号文件
+bigWig 用来画信号轨迹（峰图上的那条“山丘”线）。
+
+
+cd ~/chipseq_tnfr2
+mkdir -p bigwig
+
+# Treg BATF ChIP bigWig
+bamCoverage -b bam/BATF_Treg_merged.bam \
+  -o bigwig/BATF_Treg.bw \
+  --normalizeUsing RPKM \
+  --binSize 10 \
+  --smoothLength 30 \
+  -p 8
+
+# Tconv BATF ChIP bigWig
+bamCoverage -b bam/BATF_Tconv_merged.bam \
+  -o bigwig/BATF_Tconv.bw \
+  --normalizeUsing RPKM \
+  --binSize 10 \
+  --smoothLength 30 \
+  -p 8
+
+# Treg Input bigWig
+bamCoverage -b bam/Input_Treg_merged.bam \
+  -o bigwig/Input_Treg.bw \
+  --normalizeUsing RPKM \
+  --binSize 10 \
+  --smoothLength 30 \
+  -p 8
+
+# Tconv Input bigWig
+bamCoverage -b bam/Input_Tconv_merged.bam \
+  -o bigwig/Input_Tconv.bw \
+  --normalizeUsing RPKM \
+  --binSize 10 \
+  --smoothLength 30 \
+  -p 8
+
+
+
+
+!!!!!!!!!!!这要重新创建环境
+
+# 创建专门的环境，指定兼容的 Python 和 numpy 版本
+conda create -n macs2fix python=3.9 numpy=1.23.5 -y
+conda activate macs2fix
+conda install -c bioconda macs2=2.2.7.1 -y
+
+  1.2 用论文的参数重新 call peaks
+cd ~/chipseq_tnfr2
+
+# Treg
+macs2 callpeak \
+  -t bam/BATF_Treg_merged.bam \
+  -c bam/Input_Treg_merged.bam \
+  -f BAM -g mm -n BATF_Treg \
+  --outdir peaks \
+  -q 1e-4
+
+# Tconv
+macs2 callpeak \
+  -t bam/BATF_Tconv_merged.bam \
+  -c bam/Input_Tconv_merged.bam \
+  -f BAM -g mm -n BATF_Tconv \
+  --outdir peaks \
+  -q 1e-4
+
+作图
+
